@@ -1,0 +1,461 @@
+openapi: 3.0.3
+info:
+  title: Reneo Backend API
+  description: >
+    Backend API for a slice of Reneo's multi-seller commerce platform.
+    Sellers manage their own catalogue; customers place orders that can span
+    multiple sellers. All endpoints require authentication via a Supabase
+    Auth JWT except /health.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: Health
+  - name: Products
+  - name: Orders
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /products:
+    get:
+      tags: [Products]
+      summary: List products with search, filtering, and pagination
+      description: >
+        Available to any authenticated user. Only returns non-archived products.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: search
+          in: query
+          description: Case-insensitive substring match on product name.
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: min_price
+          in: query
+          description: Minimum price in cents (inclusive).
+          schema: { type: integer, minimum: 0 }
+        - name: max_price
+          in: query
+          description: Maximum price in cents (inclusive).
+          schema: { type: integer, minimum: 0 }
+        - name: available
+          in: query
+          schema: { type: boolean }
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            enum: [price_cents, created_at, name]
+            default: created_at
+        - name: sort_dir
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: Paginated list of products
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Product" }
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+    post:
+      tags: [Products]
+      summary: Create a product
+      description: >
+        Seller-only. A store is auto-created for the seller on their first
+        product if one doesn't already exist.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, price_cents]
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                description: { type: string, maxLength: 2000 }
+                category: { type: string, maxLength: 100 }
+                price_cents: { type: integer, minimum: 0 }
+                initial_stock: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "201":
+          description: Product created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: Caller is not a SELLER
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /products/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+
+    get:
+      tags: [Products]
+      summary: Get a single product by id
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Product found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [Products]
+      summary: Update a product
+      description: >
+        Seller-only, and only the owning seller. Non-owners receive 404, not
+        403 — Row Level Security filters the row out of what's visible
+        rather than surfacing a permission error, so a non-owner cannot
+        distinguish "not mine" from "doesn't exist."
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                description: { type: string, maxLength: 2000 }
+                category: { type: string, maxLength: 100 }
+                price_cents: { type: integer, minimum: 0 }
+                is_available: { type: boolean }
+                is_archived: { type: boolean }
+      responses:
+        "200":
+          description: Product updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: Caller is not a SELLER
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Product not found, or caller does not own it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    delete:
+      tags: [Products]
+      summary: Archive a product
+      description: >
+        Seller-only. This is a soft delete (sets is_archived = true,
+        is_available = false) rather than a hard SQL delete, since
+        order_items may reference this product historically.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Product archived
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: Caller is not a SELLER
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List the authenticated customer's orders
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of the caller's orders with their items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Order" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+    post:
+      tags: [Orders]
+      summary: Create an order
+      description: >
+        Customer-only. Price, stock, and seller are resolved server-side
+        from the database — a client-supplied price is never trusted and
+        is rejected outright by strict schema validation if present. Stock
+        is decremented atomically; if two simultaneous requests target the
+        last unit of a product, exactly one succeeds and the other receives
+        409. Supports an optional Idempotency-Key header — repeating the
+        same key returns the original order rather than creating a duplicate
+        or double-decrementing stock.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+          description: >
+            Arbitrary client-generated string. Repeat requests with the same
+            key (from the same customer) return the original order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              additionalProperties: false
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [product_id, quantity]
+                    additionalProperties: false
+                    properties:
+                      product_id: { type: string, format: uuid }
+                      quantity: { type: integer, minimum: 1 }
+      responses:
+        "201":
+          description: Order created (or the original order, if the idempotency key was reused)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Order" }
+        "400":
+          description: >
+            Invalid input — including an order item containing an
+            unrecognized field such as a client-supplied price.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          description: Caller is not a CUSTOMER
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: One or more products are not available
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Insufficient stock for one or more items
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /orders/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+
+    get:
+      tags: [Orders]
+      summary: Get a single order by id, with its items
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Order found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Order" }
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Supabase Auth access token, obtained via sign-in.
+
+  schemas:
+    Product:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        store_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        price_cents: { type: integer }
+        is_available: { type: boolean }
+        is_archived: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    OrderItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        order_id: { type: string, format: uuid }
+        product_id: { type: string, format: uuid }
+        seller_id: { type: string, format: uuid }
+        quantity: { type: integer }
+        unit_price_cents:
+          type: integer
+          description: Price snapshotted at the moment of order creation.
+        created_at: { type: string, format: date-time }
+
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [PENDING, CONFIRMED, CANCELLED]
+        total_cents: { type: integer }
+        idempotency_key: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderItem" }
+
+    Pagination:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        total_pages: { type: integer }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum:
+                - BAD_REQUEST
+                - UNAUTHENTICATED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - INTERNAL
+            message:
+              type: string
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: Missing, invalid, or expired token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+security:
+  - bearerAuth: []
